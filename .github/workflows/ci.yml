@@ -1,0 +1,246 @@
+# Copyright 2026 ETF2L Contributors, Dave
+#
+# Builds SMCrypto on every push, pull request and manual run: for Linux
+# (x86 and x86_64) Mbed TLS with vcpkg at the commit vcpkg/vcpkg.json pins
+# (cached), the extension against SourceMod and with AMBuild at the commits
+# toolchain.json pins, its unit tests on both architectures and the
+# check of its exports and glibc version;
+# for Windows (x86 and x64) windows/build.py, which builds with MSVC, runs
+# the unit tests and checks exports and dependencies. It packs an archive
+# per system laid out like a game folder. For a pushed v* tag it also
+# publishes them as a GitHub release, after checking that the tag matches
+# the version in extension/src/version.h. The SourcePawn tests need
+# smrunner (sm-runner) and do not run here. A separate job
+# checks the SourcePawn files in scripting/, examples/ and tests/ with
+# pawncritic and pawntidy --check (sourcepawn-tools' SourcePawn Lint action).
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # SMCrypto's binaries may require at most this glibc version.
+  MAX_GLIBC: '2.35'
+
+jobs:
+  lint:
+    name: Lint (SourcePawn)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run pawncritic and pawntidy
+        uses: davenonymous/sourcepawn-tools@v0
+        with:
+          paths: |
+            scripting
+            examples
+            tests
+          tidy: true
+
+  linux:
+    name: Build (linux)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -yq --no-install-recommends clang gcc-multilib g++-multilib curl zip unzip pkg-config
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: smcrypto
+
+      - name: Find the pinned SourceMod and AMBuild commits
+        id: toolchain
+        run: |
+          for name in sourcemod ambuild; do
+            commit=$(python3 -c "import json; print(json.load(open('smcrypto/toolchain.json'))['$name'])")
+            echo "$name=$commit" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Checkout SourceMod
+        uses: actions/checkout@v4
+        with:
+          repository: alliedmodders/sourcemod
+          ref: ${{ steps.toolchain.outputs.sourcemod }}
+          path: sourcemod
+          submodules: recursive
+
+      - name: Find the pinned vcpkg commit
+        id: vcpkg
+        run: |
+          commit=$(python3 -c 'import json; print(json.load(open("smcrypto/vcpkg/vcpkg.json"))["builtin-baseline"])')
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg.outputs.commit }}
+          path: vcpkg
+
+      - name: Cache the vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg-archives
+          key: vcpkg-linux-${{ hashFiles('smcrypto/vcpkg/**') }}
+
+      - name: Build Mbed TLS
+        run: |
+          mkdir -p ~/.cache/vcpkg-archives
+          export VCPKG_BINARY_SOURCES="clear;files,$HOME/.cache/vcpkg-archives,readwrite"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          mkdir -p libs
+          for arch in x86 x64; do
+            ./vcpkg/vcpkg install --x-manifest-root=smcrypto/vcpkg --triplet "$arch-linux-smcrypto" \
+              --host-triplet x64-linux --x-install-root="libs-$arch" --clean-after-build
+            mv "libs-$arch/$arch-linux-smcrypto" "libs/$arch"
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install AMBuild
+        run: pip install "git+https://github.com/alliedmodders/ambuild@${{ steps.toolchain.outputs.ambuild }}"
+
+      - name: Build
+        run: |
+          export CC=clang CXX=clang++
+          mkdir -p build
+          cd build
+          python ../smcrypto/extension/configure.py --enable-optimize --targets=x86,x86_64 \
+            --sm-path=../sourcemod --libs-path=../libs
+          ambuild
+
+      - name: Run the unit tests
+        run: |
+          for arch in x86 x86_64; do
+            "build/tests/smcrypto-tests-$arch/linux-$arch/smcrypto-tests-$arch"
+          done
+
+      - name: Check the binaries' exports and glibc version
+        run: |
+          for binary in build/smcrypto.ext/linux-*/smcrypto.ext.so; do
+            exported=$(nm -D --defined-only "$binary" | awk '{print $3}' | grep -v '^$' | sort | tr '\n' ' ')
+            if [ "$exported" != "GetSMExtAPI " ]; then
+              echo "::error::$binary exports $exported"
+              exit 1
+            fi
+            needed=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$binary needs glibc $needed"
+            if [ "$(printf '%s\n%s\n' "$needed" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+              echo "::error::$binary needs glibc $needed, more than $MAX_GLIBC"
+              exit 1
+            fi
+          done
+
+      - name: Pack
+        run: |
+          label="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF" == refs/tags/* ]] || label="${GITHUB_SHA::7}"
+          sm=stage/addons/sourcemod
+          mkdir -p "$sm/extensions/x64" "$sm/scripting/include" "$sm/licenses/smcrypto"
+          strip --strip-debug -o "$sm/extensions/smcrypto.ext.so" build/smcrypto.ext/linux-x86/smcrypto.ext.so
+          strip --strip-debug -o "$sm/extensions/x64/smcrypto.ext.so" build/smcrypto.ext/linux-x86_64/smcrypto.ext.so
+          cp smcrypto/scripting/include/smcrypto.inc "$sm/scripting/include/"
+          cp smcrypto/LICENSE.txt smcrypto/licenses/GPLv2.txt smcrypto/licenses/GPLv3.txt "$sm/licenses/smcrypto/"
+          cp libs/x86/share/mbedtls/copyright "$sm/licenses/smcrypto/mbedtls.txt"
+          tar -czf "sm-crypto-$label-linux.tar.gz" -C stage addons
+          find stage -type f | sort
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: sm-crypto-linux
+          path: sm-crypto-*-linux.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Build (windows)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: smcrypto
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build, test and check
+        run: python smcrypto\windows\build.py --work "$env:RUNNER_TEMP\work" --out "$env:RUNNER_TEMP\out"
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          $label = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0, 7) }
+          $sm = 'stage\addons\sourcemod'
+          New-Item -ItemType Directory -Force "$sm\extensions\x64", "$sm\scripting\include", "$sm\licenses\smcrypto" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\out\extensions\smcrypto.ext.dll" "$sm\extensions\"
+          Copy-Item "$env:RUNNER_TEMP\out\extensions\x64\smcrypto.ext.dll" "$sm\extensions\x64\"
+          Copy-Item smcrypto\scripting\include\smcrypto.inc "$sm\scripting\include\"
+          Copy-Item smcrypto\LICENSE.txt, smcrypto\licenses\GPLv2.txt, smcrypto\licenses\GPLv3.txt "$sm\licenses\smcrypto\"
+          Copy-Item "$env:RUNNER_TEMP\work\libs\x86\share\mbedtls\copyright" "$sm\licenses\smcrypto\mbedtls.txt"
+          Compress-Archive -Path stage\addons -DestinationPath "sm-crypto-$label-windows.zip"
+          Get-ChildItem -Recurse stage -File | ForEach-Object { $_.FullName }
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: sm-crypto-windows
+          path: sm-crypto-*-windows.zip
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check that the tag matches the extension version
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version=$(sed -n 's/^#define SMCRYPTO_VERSION_STRING "\(.*\)"$/\1/p' extension/src/version.h)
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag does not match version $version in extension/src/version.h"
+            exit 1
+          fi
+          echo "Version $version matches tag $tag"
+
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          path: archives
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" archives/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

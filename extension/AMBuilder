@@ -1,0 +1,18 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et:
+# Copyright 2026 ETF2L Contributors, Dave
+#
+# The extension itself: the core plus the SourceMod layer.
+import os
+
+project = builder.LibraryProject('smcrypto.ext')
+project.sources += Extension.core_sources()
+source_dir = os.path.join(builder.sourcePath, 'src')
+project.sources += [os.path.join(source_dir, name) for name in sorted(os.listdir(source_dir))
+                    if name.endswith('.cpp')]
+
+for cxx in builder.targets:
+  binary = project.Configure(cxx, project.name, 'Release - {}'.format(cxx.target.arch))
+  Extension.use_libraries(binary)
+  Extension.configure_extension(binary)
+
+builder.Add(project)

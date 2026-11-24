@@ -1,0 +1,10 @@
+/* Copyright 2026 ETF2L Contributors, Dave
+ *
+ * The only symbol the extension exports on Linux: SourceMod's entry point.
+ * Everything else, Mbed TLS and libstdc++ included, stays local. */
+{
+	global:
+		GetSMExtAPI;
+	local:
+		*;
+};

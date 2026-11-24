@@ -1,0 +1,17 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et:
+# Copyright 2026 ETF2L Contributors, Dave
+#
+# The unit tests of the core, one program per architecture, without
+# SourceMod.
+import os
+
+project = builder.ProgramProject('smcrypto-tests')
+project.sources += Extension.core_sources()
+test_dir = os.path.join(builder.sourcePath, 'tests')
+project.sources += [os.path.join(test_dir, name) for name in sorted(os.listdir(test_dir)) if name.endswith('.cpp')]
+
+for cxx in builder.targets:
+  binary = project.Configure(cxx, 'smcrypto-tests-' + cxx.target.arch, 'Tests - {}'.format(cxx.target.arch))
+  Extension.use_libraries(binary)
+
+builder.Add(project)

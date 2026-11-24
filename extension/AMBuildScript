@@ -1,0 +1,111 @@
+# vim: set sts=2 ts=8 sw=2 tw=99 et ft=python:
+# Copyright 2026 ETF2L Contributors, Dave
+#
+# Builds smcrypto.ext and the unit tests (a program) for every target
+# architecture, on Linux with clang or gcc and on Windows with MSVC. The
+# extension uses no engine or Metamod API, so each binary serves every game.
+# Compiler settings follow SourceMod's own AMBuildScript.
+import os
+
+def Normalize(path):
+  return os.path.abspath(os.path.normpath(path))
+
+class ExtensionConfig(object):
+  def __init__(self):
+    sm_path = builder.options.sm_path
+    if not sm_path or not os.path.isdir(sm_path):
+      raise Exception('--sm-path must name the SourceMod folder')
+    libs_path = builder.options.libs_path
+    if not libs_path or not os.path.isdir(libs_path):
+      raise Exception('--libs-path must name the folder of the vcpkg libraries')
+    self.sm_root = Normalize(sm_path)
+    self.libs_root = Normalize(libs_path)
+    self.all_targets = []
+    for arch in builder.options.targets.split(','):
+      cxx = builder.DetectCxx(target_arch = arch)
+      self.configure_cxx(cxx)
+      self.all_targets.append(cxx)
+
+  def libs_dir(self, arch):
+    return os.path.join(self.libs_root, 'x64' if arch == 'x86_64' else 'x86')
+
+  def configure_cxx(self, cxx):
+    if cxx.family == 'msvc':
+      self.configure_msvc(cxx)
+    elif cxx.like('gcc'):
+      self.configure_gcc(cxx)
+    else:
+      raise Exception('Unsupported compiler {}'.format(cxx.family))
+    cxx.includes += [os.path.join(builder.sourcePath, 'src'),
+                     os.path.join(builder.sourcePath, 'src', 'core')]
+
+  def configure_gcc(self, cxx):
+    if builder.options.opt == '1':
+      cxx.defines += ['NDEBUG']
+      cxx.cflags += ['-O3']
+    if builder.options.debug == '1':
+      cxx.defines += ['DEBUG', '_DEBUG']
+      cxx.cflags += ['-g3']
+    cxx.defines += ['HAVE_STDINT_H', 'GNUC', 'LINUX', '_LINUX', 'POSIX', '_FILE_OFFSET_BITS=64']
+    cxx.cflags += ['-pipe', '-fno-strict-aliasing', '-Wall', '-Werror', '-fvisibility=hidden', '-msse',
+                   '-fno-omit-frame-pointer', '-fPIC']
+    cxx.cxxflags += ['-std=c++17', '-Wno-non-virtual-dtor', '-Wno-overloaded-virtual',
+                     '-fvisibility-inlines-hidden', '-Wno-unused-parameter']
+    if cxx.family == 'clang':
+      cxx.cxxflags += ['-Wno-implicit-exception-spec-mismatch']
+    cxx.linkflags += ['-lm', '-static-libstdc++', '-lpthread']
+
+  def configure_msvc(self, cxx):
+    if builder.options.opt == '1':
+      cxx.defines += ['NDEBUG']
+      cxx.cflags += ['/Ox', '/Zo']
+      cxx.linkflags += ['/OPT:ICF', '/OPT:REF']
+    if builder.options.debug == '1':
+      cxx.defines += ['DEBUG', '_DEBUG']
+    # The static runtime, as SourceMod and the vcpkg triplets use it.
+    cxx.cflags += ['/MT', '/W3', '/WX', '/Oy-']
+    cxx.defines += ['WIN32', '_WINDOWS', '_CRT_SECURE_NO_DEPRECATE', '_CRT_SECURE_NO_WARNINGS',
+                    '_CRT_NONSTDC_NO_DEPRECATE', '_ITERATOR_DEBUG_LEVEL=0', 'NOMINMAX',
+                    'WIN32_LEAN_AND_MEAN']
+    cxx.cxxflags += ['/EHsc', '/GR-', '/TP', '/std:c++17']
+    cxx.linkflags += ['/DEBUG', 'kernel32.lib', 'user32.lib', 'advapi32.lib']
+
+  # The core without SourceMod: shared by the extension and its tests.
+  def core_sources(self):
+    full = os.path.join(builder.sourcePath, 'src', 'core')
+    return [os.path.join(full, name) for name in sorted(os.listdir(full)) if name.endswith('.cpp')]
+
+  # Mbed TLS's headers and crypto library for the binary's architecture;
+  # on Windows its entropy source needs bcrypt.lib.
+  def use_libraries(self, binary):
+    compiler = binary.compiler
+    libs = self.libs_dir(compiler.target.arch)
+    compiler.includes += [os.path.join(libs, 'include')]
+    if compiler.family == 'msvc':
+      compiler.postlink += [os.path.join(libs, 'lib', 'mbedcrypto.lib'), 'bcrypt.lib']
+    else:
+      compiler.postlink += [os.path.join(libs, 'lib', 'libmbedcrypto.a')]
+
+  def configure_extension(self, binary):
+    compiler = binary.compiler
+    compiler.cxxincludes += [
+      os.path.join(self.sm_root, 'public'),
+      os.path.join(self.sm_root, 'public', 'extensions'),
+      os.path.join(self.sm_root, 'sourcepawn', 'include'),
+      os.path.join(self.sm_root, 'public', 'amtl', 'amtl'),
+      os.path.join(self.sm_root, 'public', 'amtl'),
+    ]
+    binary.sources += [os.path.join(self.sm_root, 'public', 'smsdk_ext.cpp')]
+    if compiler.family != 'msvc':
+      # Only SourceMod's entry point leaves the library; on Windows only
+      # what is marked for export does.
+      compiler.linkflags += [
+        '-Wl,--exclude-libs,ALL',
+        '-Wl,--version-script=' + os.path.join(builder.sourcePath, 'exports.map'),
+        '-Wl,--no-undefined',
+      ]
+
+Extension = ExtensionConfig()
+
+builder.targets = builder.CloneableList(Extension.all_targets)
+builder.Build(['AMBuilder', 'tests/AMBuilder'], {'Extension': Extension})
