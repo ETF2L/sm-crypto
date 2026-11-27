@@ -9,9 +9,10 @@
 # the unit tests and checks exports and dependencies. It packs an archive
 # per system laid out like a game folder. For a pushed v* tag it also
 # publishes them as a GitHub release, after checking that the tag matches
-# the version in extension/src/version.h. The SourcePawn tests need
-# smrunner (sm-runner) and do not run here. A separate job
-# checks the SourcePawn files in scripting/, examples/ and tests/ with
+# the version in extension/src/version.h. The Linux job also runs the
+# SourcePawn tests (tests/) and the examples' tests against the packed
+# extension under smrunner (sm-runner's setup and test actions), with both
+# runners. A separate job checks the SourcePawn files in scripting/, examples/ and tests/ with
 # pawncritic and pawntidy --check (sourcepawn-tools' SourcePawn Lint action).
 
 name: CI
@@ -160,6 +161,33 @@ jobs:
           cp libs/x86/share/mbedtls/copyright "$sm/licenses/smcrypto/mbedtls.txt"
           tar -czf "sm-crypto-$label-linux.tar.gz" -C stage addons
           find stage -type f | sort
+
+      - name: Set up smrunner
+        uses: davenonymous/sm-runner/setup@v0
+        with:
+          spcomp: true
+
+      - name: Run the SourcePawn tests
+        uses: davenonymous/sm-runner/test@v0
+        with:
+          working-directory: smcrypto
+          tests: tests/test_smcrypto.sp
+          plugins: tests/key-holder.sp
+          include-paths: scripting/include
+          extensions: ${{ github.workspace }}/stage/addons/sourcemod/extensions
+
+      - name: Run the examples' tests
+        uses: davenonymous/sm-runner/test@v0
+        with:
+          working-directory: smcrypto
+          tests: tests/test_examples.sp
+          plugins: |
+            examples/hash-text.sp
+            examples/verify-file.sp
+            examples/signed-links.sp
+            examples/sealed-notes.sp
+          include-paths: scripting/include
+          extensions: ${{ github.workspace }}/stage/addons/sourcemod/extensions
 
       - name: Upload the archive
         uses: actions/upload-artifact@v4

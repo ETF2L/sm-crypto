@@ -12,8 +12,9 @@ Ubuntu 22.04 runner:
    the commits `toolchain.json` pins; the tests run on both architectures, and the binaries are checked to export only
    `GetSMExtAPI` and need at most glibc 2.35.
 3. It packs `sm-crypto-<label>-linux.tar.gz`, laid out like a game folder.
-
-The SourcePawn tests and the examples' tests need sm-runner's smrunner and do not run in CI.
+4. sm-runner's setup and test actions (`davenonymous/sm-runner/setup@v0` and `test@v0`) run the SourcePawn tests and
+   the examples' tests against the packed extension, with both `smrunner` and `smrunner64`. A failing test fails the
+   job, so no release is published.
 
 The `windows` job runs `windows/build.py`, which works on its own on any Windows machine with Visual Studio 2022 (or
 its Build Tools) with the C++ tools, git and Python 3.8 or newer:
@@ -46,10 +47,20 @@ For a pushed `v*` tag the `release` job publishes both archives, after checking 
   encoding, binary data, the documented native errors (through `Runner.ExpectError`), memory that runs past the
   plugin, file jobs on the worker thread with their errors and cancellation, and keys of another plugin
   (`tests/key-holder.sp`) out of reach. `tests/test_examples.sp` runs the four examples through their commands, with
-  a connected player for the signed links.
-- **CI** (`.github/workflows/ci.yml`): builds both systems and runs the unit tests on every push, and checks the
-  SourcePawn files in `scripting/`, `examples/` and `tests/` with pawncritic and `pawntidy --check` (sourcepawn-tools'
-  SourcePawn Lint action); the SourcePawn tests need smrunner and do not run there.
+  a connected player for the signed links. Both need [sm-runner](https://github.com/davenonymous/sm-runner)'s
+  smrunner. Compile them with `scripting/include` and smrunner's `share/include` on the include path, then run them
+  against an extension folder laid out like `addons/sourcemod/extensions` (the packed archive's):
+
+  ```
+  smrunner test test_smcrypto.smx --extensions <dist>/extensions --plugin key-holder.smx
+  smrunner test test_examples.smx --extensions <dist>/extensions \
+      --plugin hash-text.smx --plugin verify-file.smx --plugin signed-links.smx --plugin sealed-notes.smx
+  ```
+
+  `smrunner` loads the x86 extension, `smrunner64` the x64 one.
+- **CI** (`.github/workflows/ci.yml`): builds both systems and runs the unit tests on every push, runs the SourcePawn
+  tests and the examples' tests under smrunner on Linux, and checks the SourcePawn files in `scripting/`, `examples/`
+  and `tests/` with pawncritic and `pawntidy --check` (sourcepawn-tools' SourcePawn Lint action).
 
 The Windows DLLs have been tested by their unit tests only, not on a Windows game server.
 
